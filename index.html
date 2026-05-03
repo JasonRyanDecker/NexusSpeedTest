@@ -863,8 +863,8 @@
                 ];
                 
                 this.downloadEndpoints = [
-                    'https://speed.cloudflare.com/__down?bytes=100000000',
-                    'https://proof.ovh.net/files/100Mb.dat'
+                    'https://speed.cloudflare.com/__down?bytes=500000000',
+                    'https://proof.ovh.net/files/1Gb.dat'
                 ];
                 
                 this.uploadEndpoint = 'https://speed.cloudflare.com/__up';
@@ -924,7 +924,7 @@
             }
             
             async testDownload(onProgress) {
-                const duration = 10000;
+                const duration = 20000; // 20 seconds
                 const speeds = [];
                 
                 for (const endpoint of this.downloadEndpoints) {
@@ -971,35 +971,50 @@
             }
             
             async testUpload(onProgress) {
-                const duration = 10000;
-                const size = 25 * 1024 * 1024; // 25MB
-                const data = new Blob([new ArrayBuffer(size)]);
+                const duration = 20000; // 20 seconds
+                const chunkSize = 25 * 1024 * 1024; // 25MB per chunk
+                const chunkData = new Blob([new ArrayBuffer(chunkSize)]);
                 const start = performance.now();
-                
-                const interval = setInterval(() => {
-                    const elapsed = performance.now() - start;
-                    if (elapsed < duration && elapsed > 500) {
-                        const sentBytes = size * Math.min(elapsed / duration, 1);
-                        const mbps = (sentBytes * 8 / (elapsed / 1000)) / (1024 * 1024);
-                        if (onProgress) onProgress(mbps);
-                    }
-                }, 200);
+                let totalBytesSent = 0;
+                const speeds = [];
                 
                 try {
-                    await Promise.race([
-                        fetch(this.uploadEndpoint, {
-                            method: 'POST',
-                            body: data,
-                            cache: 'no-cache',
-                            mode: 'cors'
-                        }),
-                        new Promise(r => setTimeout(r, duration))
-                    ]);
-                    clearInterval(interval);
-                    const elapsed = Math.min(performance.now() - start, duration);
-                    return (size * 8 / (elapsed / 1000)) / (1024 * 1024);
+                    // Keep uploading chunks until duration is reached
+                    while (performance.now() - start < duration) {
+                        const chunkStart = performance.now();
+                        
+                        try {
+                            await Promise.race([
+                                fetch(this.uploadEndpoint, {
+                                    method: 'POST',
+                                    body: chunkData,
+                                    cache: 'no-cache',
+                                    mode: 'cors'
+                                }),
+                                new Promise(r => setTimeout(r, duration - (performance.now() - start)))
+                            ]);
+                            
+                            const chunkDuration = (performance.now() - chunkStart) / 1000;
+                            if (chunkDuration > 0) {
+                                totalBytesSent += chunkSize;
+                                const mbps = (chunkSize * 8 / chunkDuration) / (1024 * 1024);
+                                speeds.push(mbps);
+                                if (onProgress) onProgress(mbps);
+                            }
+                        } catch (e) {
+                            break;
+                        }
+                        
+                        // Quick break check
+                        if (performance.now() - start >= duration) break;
+                    }
+                    
+                    if (speeds.length === 0) return 0;
+                    
+                    // Average speed (drop first sample to avoid TCP slow-start bias)
+                    const valid = speeds.length > 1 ? speeds.slice(1) : speeds;
+                    return valid.reduce((a, b) => a + b) / valid.length;
                 } catch (e) {
-                    clearInterval(interval);
                     console.warn('Upload test failed:', e);
                     return 0;
                 }
@@ -1061,23 +1076,27 @@
                     animateValue(document.getElementById('pingVal'), ping.avg);
                     animateValue(document.getElementById('jitterVal'), ping.jitter);
                     
-                    setPhase('Download');
+                    // Download — 20 seconds with countdown
+                    const downloadCountdown = this.startCountdown('Download', 20);
                     const download = await this.test.testDownload(speed => {
                         updateGauge(speed);
                     });
+                    clearInterval(downloadCountdown);
                     this.test.results.download = download;
                     updateGauge(download);
                     animateValue(document.getElementById('downloadResult'), download, 800);
                     
-                    await new Promise(r => setTimeout(r, 800));
+                    await new Promise(r => setTimeout(r, 1000));
                     
-                    setPhase('Upload');
+                    // Upload — 20 seconds with countdown
                     updateGauge(0);
                     await new Promise(r => setTimeout(r, 400));
                     
+                    const uploadCountdown = this.startCountdown('Upload', 20);
                     const upload = await this.test.testUpload(speed => {
                         updateGauge(speed);
                     });
+                    clearInterval(uploadCountdown);
                     this.test.results.upload = upload;
                     updateGauge(upload);
                     animateValue(document.getElementById('uploadResult'), upload, 800);
@@ -1102,6 +1121,17 @@
                     btn.disabled = false;
                     btnText.textContent = 'Run Again';
                 }
+            }
+            
+            startCountdown(label, seconds) {
+                let remaining = seconds;
+                setPhase(`${label} · ${remaining}s`);
+                return setInterval(() => {
+                    remaining--;
+                    if (remaining > 0) {
+                        setPhase(`${label} · ${remaining}s`);
+                    }
+                }, 1000);
             }
         }
         
